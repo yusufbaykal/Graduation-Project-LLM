@@ -3,28 +3,30 @@ import pandas as pd
 import streamlit as st
 from turkish_yaz import turkish_denet
 from turkish_yaz import TurkishNLP
-from PyPDF2 import PdfReader
-from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.callbacks.manager import get_openai_callback
-from langchain.text_splitter import CharacterTextSplitter
+import streamlit as st
+from pypdf import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.llms import OpenAI
-from langchain.chains import RetrievalQA
-from langchain_community.document_loaders import WebBaseLoader
-from langchain.prompts.chat import (ChatPromptTemplate,
-                                    HumanMessagePromptTemplate,
-                                    SystemMessagePromptTemplate)
+from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import Chroma
-import json
-from streamlit_lottie import st_lottie
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain_openai import ChatOpenAI
+from langchain_community.document_loaders import WebBaseLoader
+from langchain.chains import RetrievalQA
+from langchain_community.callbacks.manager import get_openai_callback
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+import os
 from PIL import Image
 from dotenv import load_dotenv
+from dotenv import load_dotenv
+from huggingface_hub import login
 denetci = turkish_denet()
 turknlp = TurkishNLP()
-
 load_dotenv()
+
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def main():
@@ -101,82 +103,95 @@ def AnaSayfa():
         </div>
         """, unsafe_allow_html=True)
 
-def chat_pdf():
-    st.header("Dökümanlarınız İle Sohbet Edin!! 🤷‍♀️💬")
+def get_advanced_text_splitter():
+    return RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len,
+        separators=["\n\n", "\n", " ", ""]
+    )
 
+def get_advanced_retriever(vectorstore):
+    base_retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 5})
+    llm = ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo')
+    compressor = LLMChainExtractor.from_llm(llm)
+    return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
+
+def chat_pdf():
+    st.header("Gelişmiş RAG ile Dökümanlarınız İle Sohbet Edin!! 🤷‍♀️💬")
+    
     pdf = st.sidebar.file_uploader("Döküman Yükle", type="pdf")
     text = ""
     if pdf is not None:
         pdf_reader = PdfReader(pdf)
         for page in pdf_reader.pages:
             text += page.extract_text()
-
+    
     if text:
-        text_splitter = CharacterTextSplitter(
-            separator="\n",
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len
-        )
+        text_splitter = get_advanced_text_splitter()
         chunks = text_splitter.split_text(text)
-
+        
         if chunks:
-            embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+            embeddings = OpenAIEmbeddings(model='text-embedding-3-small', openai_api_key=OPENAI_API_KEY)
             knowledge_base = FAISS.from_texts(chunks, embeddings)
-
-            with st.form(key='my_form'):
-                st.write(" Merhabalar, Sorularınızı Sormaya Devam Edin. 👋")
-                user_question = st.text_input("Sorunuzu Giriniz:")
-                if st.form_submit_button("Soru Gönder"):
-                    if user_question:
-                        docs = knowledge_base.similarity_search(user_question)
-                        llm = ChatOpenAI(model_name="gpt-3.5-turbo")
-                        chain = load_qa_chain(llm, chain_type="stuff")
-                        with get_openai_callback():
-                            response = chain.run(input_documents=docs, question=user_question)
-                        st.write(response)
+            
+            retriever = get_advanced_retriever(knowledge_base)
+            
+            memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+            
+            qa_chain = ConversationalRetrievalChain.from_llm(
+                llm=ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo'),
+                retriever=retriever,
+                memory=memory
+            )
+            
+            st.write(" Merhabalar, Sorularınızı Sormaya Devam Edin. 👋")
+            user_question = st.text_input("Sorunuzu Giriniz:")
+            if user_question:
+                with get_openai_callback() as cb:
+                    response = qa_chain({"question": user_question})
+                st.write(response['answer'])
+                st.write(f"Tokens used: {cb.total_tokens}")
         else:
             st.error("Döküman metni boş. Lütfen geçerli bir PDF yükleyin.")
 
 def chat_web():
-    st.subheader('🦜🔗 Web Chatbot 🦜🔗')
+    st.subheader('🦜🔗 Gelişmiş RAG Web Chatbot 🦜🔗')
     url = st.text_input("##### Web Sitesini Giriniz:")
-
+    
     prompt = st.text_area("##### Sorularınızı Giriniz:")
     if st.button("Soruları Gönder", type="primary"):
         ABS_PATH = os.path.dirname(os.path.abspath(__file__))
         DB_DIR = os.path.join(ABS_PATH, "db")
-
+        
         loader = WebBaseLoader(url)
         data = loader.load()
-
-        text_splitter = CharacterTextSplitter(
-            separator='\n',
-            chunk_size=500,
-            chunk_overlap=40
-        )
-
+        
+        text_splitter = get_advanced_text_splitter()
+        
         docs = text_splitter.split_documents(data)
-        openai_embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-
+        openai_embeddings = OpenAIEmbeddings(model='text-embedding-3-small',openai_api_key=OPENAI_API_KEY) 
+       
         vectordb = Chroma.from_documents(
             documents=docs,
             embedding=openai_embeddings,
             persist_directory=DB_DIR
         )
-
+        
         vectordb.persist()
-        retriever = vectordb.as_retriever()
-
+        retriever = get_advanced_retriever(vectordb)
+        
         qa_chain = RetrievalQA.from_chain_type(
-            llm=ChatOpenAI(model_name='gpt-3.5-turbo'),
+            llm=ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo'),
             chain_type='stuff',
             retriever=retriever,
             return_source_documents=True
         )
-
-        response = qa_chain(prompt)
-        st.write(response)
+        
+        with get_openai_callback() as cb:
+            response = qa_chain(prompt)
+        st.write(response['result'])
+        st.write(f"Tokens used: {cb.total_tokens}")
 
 def turkish_data_preprocessing():
 
