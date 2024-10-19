@@ -1,28 +1,29 @@
 import os
 import pandas as pd
 import streamlit as st
-from turkish_yaz import turkish_denet
-from turkish_yaz import TurkishNLP
+from turkish_yaz import TurkishDenet
+from turkish_nlp import TurkishNLP
 import streamlit as st
 from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import Chroma
-from langchain.chains import ConversationalRetrievalChain
+from langchain.chains.mapreduce import MapReduceDocumentsChain
 from langchain.memory import ConversationBufferMemory
 from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import WebBaseLoader
-from langchain.chains import RetrievalQA
+from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain_community.document_loaders import UnstructuredURLLoader
 import os
 from PIL import Image
 from dotenv import load_dotenv
-from dotenv import load_dotenv
-from huggingface_hub import login
-denetci = turkish_denet()
+import json
+from streamlit_lottie import st_lottie
+denetci = TurkishDenet()
 turknlp = TurkishNLP()
 load_dotenv()
 
@@ -108,17 +109,34 @@ def get_advanced_text_splitter():
         chunk_size=1000,
         chunk_overlap=200,
         length_function=len,
-        separators=["\n\n", "\n", " ", ""]
+        separators=["\n\n", "\n", " ", ""],
     )
+
 
 def get_advanced_retriever(vectorstore):
     base_retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 5})
-    llm = ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo')
+    llm = ChatOpenAI(temperature=0.2, model_name='gpt-4')
     compressor = LLMChainExtractor.from_llm(llm)
     return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
 
+def get_qa_chain(retriever):
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True
+                                      ,input_key="query",output_key="result")
+    llm = ChatOpenAI(temperature=0.2, model_name='gpt-4')
+
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type='stuff',
+        retriever=retriever,
+        memory=memory,
+
+    )
+    return qa_chain
+
+
 def chat_pdf():
-    st.header("Gelişmiş RAG ile Dökümanlarınız İle Sohbet Edin!! 🤷‍♀️💬")
+    st.header("Dökümanlarınız İle Sohbet Edin!! 🤷‍♀️💬")
     
     pdf = st.sidebar.file_uploader("Döküman Yükle", type="pdf")
     text = ""
@@ -131,70 +149,60 @@ def chat_pdf():
         text_splitter = get_advanced_text_splitter()
         chunks = text_splitter.split_text(text)
         
-        if chunks:
-            embeddings = OpenAIEmbeddings(model='text-embedding-3-small', openai_api_key=OPENAI_API_KEY)
-            knowledge_base = FAISS.from_texts(chunks, embeddings)
-            
-            retriever = get_advanced_retriever(knowledge_base)
-            
-            memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-            
-            qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo'),
-                retriever=retriever,
-                memory=memory
-            )
-            
-            st.write(" Merhabalar, Sorularınızı Sormaya Devam Edin. 👋")
-            user_question = st.text_input("Sorunuzu Giriniz:")
-            if user_question:
-                with get_openai_callback() as cb:
-                    response = qa_chain({"question": user_question})
-                st.write(response['answer'])
-                st.write(f"Tokens used: {cb.total_tokens}")
-        else:
-            st.error("Döküman metni boş. Lütfen geçerli bir PDF yükleyin.")
+        embeddings = OpenAIEmbeddings(model='text-embedding-ada-002', openai_api_key=os.getenv("OPENAI_API_KEY"))
+        knowledge_base = FAISS.from_texts(chunks, embeddings)
+        
+        retriever = get_advanced_retriever(knowledge_base)
+        qa_chain = get_qa_chain(retriever)
+        
+        st.write("Merhabalar, Sorularınızı Sormaya Devam Edin. 👋")
+        user_question = st.text_input("Sorunuzu Giriniz:")
+        
+        if st.button("Soruyu Gönder", type="primary"):
+            inputs = {"query": user_question}
+        
+            response = qa_chain(inputs)
+            if response and "result" in response:
+                st.write(response["result"])
+            else:
+                st.error("Beklenmedik bir çıktı yapısı ile karşılaşıldı.")
 
 def chat_web():
     st.subheader('🦜🔗 Gelişmiş RAG Web Chatbot 🦜🔗')
     url = st.text_input("##### Web Sitesini Giriniz:")
-    
     prompt = st.text_area("##### Sorularınızı Giriniz:")
+
     if st.button("Soruları Gönder", type="primary"):
-        ABS_PATH = os.path.dirname(os.path.abspath(__file__))
-        DB_DIR = os.path.join(ABS_PATH, "db")
-        
-        loader = WebBaseLoader(url)
-        data = loader.load()
-        
-        text_splitter = get_advanced_text_splitter()
-        
-        docs = text_splitter.split_documents(data)
-        openai_embeddings = OpenAIEmbeddings(model='text-embedding-3-small',openai_api_key=OPENAI_API_KEY) 
-       
-        vectordb = Chroma.from_documents(
-            documents=docs,
-            embedding=openai_embeddings,
-            persist_directory=DB_DIR
-        )
-        
-        vectordb.persist()
-        retriever = get_advanced_retriever(vectordb)
-        
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo'),
-            chain_type='stuff',
-            retriever=retriever,
-            return_source_documents=True
-        )
-        
-        with get_openai_callback() as cb:
-            response = qa_chain(prompt)
-        st.write(response['result'])
-        st.write(f"Tokens used: {cb.total_tokens}")
+        try:
+            ABS_PATH = os.path.dirname(os.path.abspath(__file__))
+            DB_DIR = os.path.join(ABS_PATH, "db")
+
+            loader = WebBaseLoader(url)
+            data = loader.load()
+
+            text_splitter = get_advanced_text_splitter()
+            docs = text_splitter.split_documents(data)
+
+            openai_embeddings = OpenAIEmbeddings(model='text-embedding-ada-002')
+            vectordb = Chroma.from_documents(
+                documents=docs,
+                embedding=openai_embeddings,
+                persist_directory=DB_DIR
+            )
+            vectordb.persist()
+            
+            retriever = get_advanced_retriever(vectordb)
+            qa_chain = get_qa_chain(retriever)
+
+            with get_openai_callback() as cb:
+                response = qa_chain({"query": prompt})
+            st.write(response['result'])
+  
+        except Exception as e:
+            st.error(f"Bir hata oluştu: {str(e)}")
+
 
 def turkish_data_preprocessing():
-
     def import_json(path):
         with open(path, "r", encoding="utf8", errors="ignore") as file:
             data = json.load(file)
@@ -219,7 +227,6 @@ def turkish_data_preprocessing():
         """,
         unsafe_allow_html=True,
     )
-
     menu = ["Kısaltma Kontrol", "Kelime Kontrol", "Noktalama İşareti Ekle", "HTML Etiketleri Temizleme",
             "En Çok Kullanılan Kelimeler", "Alfa-Numeric", "Harf Dönüşümü", "Türkçe Karakter Olmayan",
             "Noktalama İşareti Kaldır", "Stop-Words Kaldır", "Kelime İstatistikleri"]
@@ -231,6 +238,7 @@ def turkish_data_preprocessing():
         if text:
             if selected_menu == "Kısaltma Kontrol":
                 text = denetci.kisaltmakontrol(text)
+                st.write("Kısaltmalar:", text[0])
             elif selected_menu == "Kelime Kontrol":
                 text,non_turkish_word_count,first_10_non_turkish_words = denetci.kelimekontrol(text)
                 st.write("Türkçe Kelime Olmayan Sayısı:", non_turkish_word_count)
@@ -263,63 +271,65 @@ def turkish_data_preprocessing():
             else:
                 st.warning("Geçerli bir işlem seçilmedi.")
                 st.stop()
-            #st.write("Denetleme Sonucu")
-            #st.write(text)
-
         else:
             st.warning("Metin Girişi Gerçekleştirmediniz.")
-
     return
 
 def Metin_İstatistik():
     """
-    Genel Açıklama: Aşağıdaki kod bloğunda, kullanıcıdan alınan metin verisi üzerinde istatistik analizleri gerçekleştiriliyor.
-    Kullanıcıdan alınan metin verisi üzerinde, metin istatistikleri hesaplanıyor. Hesaplanan metin istatistikleri tablo halinde
-    kullanıcıya sunuluyor.
+    Genel Açıklama: Kullanıcıdan alınan metin verisi üzerinde istatistik analizleri gerçekleştiriyor.
     """
-
     def import_json(path):
         with open(path, "r", encoding="utf8", errors="ignore") as file:
             data = json.load(file)
             return data
-
+        
     robo_chat = import_json(r"../data/statistik.json")
     st_lottie(robo_chat, height=400, key="adv_chat")
 
     st.markdown("""
-        #### Metin istatistikleri ile verilerinizin sesini dinleyin, gizemli anlamlarını açığa çıkarın ve bilinmeyenleri keşfedin!
-        """)
+        #### Metin istatistikleri ile verilerinizi analiz edin ve gizli anlamlarını keşfedin!
+    """)
+    
     uploudData = st.file_uploader(
         "##### Txt Dosyasını Yükleyiniz.",
         type=["TXT"],
-        help="##### Yüklenilen Belge Formata Uygun Değil!",
+        help="##### Yüklenilen belge formata uygun değil!",
     )
-    try:
-        if uploudData is not None:
+    
+    if uploudData is not None:
+        try:
             text = uploudData.read().decode("utf-8")
             istatistik_text = turknlp.metin_istatistik(text)
-            st.table([istatistik_text])
-    except Exception as e:
-        st.error(f"Hata: {e}")
+            istatistik_df = pd.DataFrame(istatistik_text.items(), columns=['İstatistik', 'Değer'])
+            st.table(istatistik_df)
+        
+        except Exception as e:
+            st.error(f"Hata: {str(e)}")
+    else:
+        st.info("Lütfen bir TXT dosyası yükleyin.")
 
 def df_donustur(df):
     return df.to_csv().encode('utf-8')
 
 def ModelHazırlık():
+    """
+    Genel Açıklama: Kullanıcıdan alınan veri seti üzerinde çeşitli ön işleme fonksiyonları uygulamak için hazırlanmış bir model.
+    """
 
     def import_json(path):
         with open(path, "r", encoding="utf8", errors="ignore") as file:
             data = json.load(file)
             return data
-
     robo_chat = import_json(r"../data/data_isle.json")
     st_lottie(robo_chat, height=400, key="adv_chat")
 
     uploudData = st.file_uploader(
         "##### Veri Setinizi Yükleyiniz.",
         type=["CSV"],
-        help="Yüklenilen Belge Formata Uygun Değil!",
+        help="Yüklenilen belge formata uygun değil!",
     )
+
     st.markdown("""
     #### Veri Setinize Uygulanacak Fonksiyonlar
     
@@ -331,30 +341,43 @@ def ModelHazırlık():
 
     **Not**: Metin istatistiklerini Analiz ve Veri Ön İşleme Sayfasından alabilirsiniz.
     """)
-    try:
-        if uploudData is not None:
+
+    if uploudData is not None:
+        try:
             df = pd.read_csv(uploudData)
             if "text" in df.columns:
+                st.success("Veri seti başarıyla yüklendi.")
+            
                 text = ' '.join(df["text"].head(5))
+                st.subheader("Yüklenilen Data")
                 st.write(text)
-                st.markdown("Düzenlenmiş Metin")
+
+                st.markdown("### Düzenlenmiş Data")
                 temiz = turknlp.clean_text(text)
                 st.write(temiz)
-                df_sonuc = pd.DataFrame({"Temizlenmiş Metin": [temiz]})
+
+
+                df_sonuc = pd.DataFrame({"Temizlenmiş Data": [temiz]})
                 csv = df_donustur(df_sonuc)
-                st.session_state["temizlenmis_metin"] = temiz
-                dosya_adi = st.text_input("Dosya Adı Giriniz:")
+                st.session_state["temizlenmis_data"] = temiz
+
+                dosya_adi = st.text_input("Dosya Adı Giriniz:", "temizlenmis_data")
+            
                 if st.button("Dosyayı İndir"):
                     st.download_button(
-                        label="Temizlenmiş Metni İndir",
+                        label="Temizlenmiş Data İndir",
                         data=csv,
                         file_name=dosya_adi + ".csv",
                         mime='text/csv',
                     )
             else:
                 st.warning("Veri setinde 'text' sütunu bulunamadı.")
-    except Exception as e:
-        st.error(f"Hata: {e}")
+        except pd.errors.EmptyDataError:
+            st.error("Yüklenen dosya boş. Lütfen geçerli bir CSV dosyası yükleyin.")
+        except Exception as e:
+            st.error(f"Hata: {str(e)}")
+    else:
+        st.info("Lütfen bir CSV dosyası yükleyin.")
 
 if __name__ == '__main__':
     main()
