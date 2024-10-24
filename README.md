@@ -25,6 +25,10 @@ OPENAI_API_KEY = ""
 
 USER_AGENT = ["my_user_agent"]
 
+# Data File
+
+* Link: https://drive.google.com/drive/folders/1rp626oPDnZqOHurQAK0AJNpiBE2EgZq6?usp=sharing
+
   
 ## Run Locally
 
